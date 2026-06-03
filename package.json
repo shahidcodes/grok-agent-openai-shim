@@ -1,0 +1,16 @@
+{
+  "name": "grok-openai-proxy",
+  "version": "1.0.0",
+  "description": "OpenAI-compatible HTTP proxy for Fireworks AI inference API",
+  "main": "proxy.ts",
+  "scripts": {
+    "start": "bun run proxy.ts",
+    "dev": "bun run --watch proxy.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

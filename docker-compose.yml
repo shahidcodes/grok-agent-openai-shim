@@ -1,0 +1,16 @@
+services:
+  proxy:
+    build: .
+    container_name: grok-openai-proxy
+    ports:
+      - "12300:12300"
+    restart: unless-stopped
+    environment:
+      - PORT=12300
+      - TARGET_HOST=api.fireworks.ai
+      - TARGET_PATH=/inference
+      - LOG_LEVEL=info
+      - LOG_BODIES=false
+
+    volumes:
+      - ./logs:/app/logs
