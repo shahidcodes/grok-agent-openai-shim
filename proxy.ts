@@ -1,10 +1,45 @@
 import http from "http";
 import https from "https";
-import { createWriteStream, mkdirSync } from "node:fs";
+import { createWriteStream, mkdirSync, readFileSync, watch } from "node:fs";
+import { resolve } from "node:path";
 
-const TARGET_HOST = process.env.TARGET_HOST || "api.fireworks.ai";
-const TARGET_PATH = process.env.TARGET_PATH || "/inference";
-const TARGET_URL = `https://${TARGET_HOST}${TARGET_PATH}`;
+// ─── Config ───────────────────────────────────────────────────────────────────
+
+interface ProviderConfig {
+  host: string;
+  basePath: string;
+  apiKey: string;
+  models: Record<string, string>;
+}
+
+interface Config {
+  providers: Record<string, ProviderConfig>;
+  defaultProvider?: string;
+}
+
+const CONFIG_PATH = process.env.CONFIG_PATH || resolve("config.json");
+
+function loadConfig(): Config {
+  const raw = readFileSync(CONFIG_PATH, "utf-8");
+  return JSON.parse(raw) as Config;
+}
+
+let config = loadConfig();
+
+// Hot-reload config.json on change
+watch(CONFIG_PATH, (event) => {
+  if (event === "change") {
+    try {
+      config = loadConfig();
+      log("info", "Config reloaded");
+    } catch (err) {
+      log("error", `Config reload failed: ${(err as Error).message}`);
+    }
+  }
+});
+
+// ─── Logging ──────────────────────────────────────────────────────────────────
+
 const PORT = Number(process.env.PORT || 3000);
 const LOG_DIR = process.env.LOG_DIR || "logs";
 const LOG_FILE = `${LOG_DIR}/proxy.log`;
@@ -32,6 +67,8 @@ function log(level: "error" | "info" | "debug", msg: string) {
   console.log(line.trimEnd());
 }
 
+// ─── Payload helpers ──────────────────────────────────────────────────────────
+
 /**
  * Recursively remove `null` from any `enum` array in a JSON payload.
  * Also remove `model_id` from message objects (Fireworks rejects it).
@@ -54,6 +91,42 @@ function cleanPayload(value: unknown): unknown {
   }
   return value;
 }
+
+interface ResolveResult {
+  provider: ProviderConfig;
+  resolvedModel: string;
+  providerName: string;
+  modelAlias: string;
+}
+
+/**
+ * Resolve a model name like "fireworks/llama3-8b" to a provider + full model ID.
+ * If no provider prefix is given, falls back to the default provider.
+ */
+function resolveProvider(modelName: string): ResolveResult | null {
+  const slashIdx = modelName.indexOf("/");
+  let providerName: string;
+  let modelAlias: string;
+
+  if (slashIdx === -1) {
+    providerName = config.defaultProvider || "";
+    modelAlias = modelName;
+  } else {
+    providerName = modelName.slice(0, slashIdx);
+    modelAlias = modelName.slice(slashIdx + 1);
+  }
+
+  const provider = config.providers[providerName];
+  if (!provider) {
+    log("error", `Unknown provider: ${providerName}`);
+    return null;
+  }
+
+  const resolvedModel = provider.models[modelAlias] || modelAlias;
+  return { provider, providerName, modelAlias, resolvedModel };
+}
+
+// ─── HTTP helpers ────────────────────────────────────────────────────────────
 
 function setCorsHeaders(res: http.ServerResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -101,6 +174,8 @@ function sendError(res: http.ServerResponse, status: number, message: string) {
   res.end(body);
 }
 
+// ─── Server ───────────────────────────────────────────────────────────────────
+
 const server = http.createServer((req, res) => {
   if (req.method === "OPTIONS") {
     setCorsHeaders(res);
@@ -111,7 +186,6 @@ const server = http.createServer((req, res) => {
 
   let proxyReq: https.ClientRequest | null = null;
 
-  // Abort upstream if the client disconnects at any point
   res.on("close", () => {
     proxyReq?.destroy();
   });
@@ -119,10 +193,10 @@ const server = http.createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (chunk) => chunks.push(chunk));
   req.on("end", () => {
-
     let body = Buffer.concat(chunks);
     let originalBody: string | null = null;
     let transformedBody: string | null = null;
+    let resolved: ResolveResult | null = null;
 
     const contentType = req.headers["content-type"] || "";
     if (contentType.includes("application/json")) {
@@ -130,6 +204,15 @@ const server = http.createServer((req, res) => {
         const text = body.toString();
         originalBody = text;
         const json = JSON.parse(text);
+        const modelName = json.model;
+
+        if (typeof modelName === "string") {
+          resolved = resolveProvider(modelName);
+          if (resolved) {
+            json.model = resolved.resolvedModel;
+          }
+        }
+
         const cleaned = cleanPayload(json);
         transformedBody = JSON.stringify(cleaned);
         body = Buffer.from(transformedBody);
@@ -138,17 +221,32 @@ const server = http.createServer((req, res) => {
       }
     }
 
-    log("info", `\n--- Request ${req.method} ${req.url} ---`);
+    const providerName = resolved?.providerName || config.defaultProvider || "unknown";
+    const provider = resolved?.provider;
+
+    log("info", `\n--- Request ${req.method} ${req.url} [${providerName}] ---`);
     if (LOG_BODIES && originalBody) log("debug", `Original body: ${originalBody}`);
     if (LOG_BODIES && transformedBody) log("debug", `Transformed body: ${transformedBody}`);
+
+    if (!provider) {
+      sendError(res, 400, "Unknown provider or missing model");
+      return;
+    }
 
     // Build outgoing headers
     const headers: http.OutgoingHttpHeaders = {};
     for (const [key, val] of Object.entries(req.headers)) {
       if (val !== undefined) headers[key] = val;
     }
-    headers["host"] = TARGET_HOST;
+
+    headers["host"] = provider.host;
     headers["content-length"] = body.length;
+
+    // Use provider API key if configured, else fall back to client auth
+    if (provider.apiKey) {
+      headers["authorization"] = `Bearer ${provider.apiKey}`;
+    }
+
     delete headers["connection"];
     delete headers["keep-alive"];
     delete headers["transfer-encoding"];
@@ -159,9 +257,9 @@ const server = http.createServer((req, res) => {
     delete headers["trailers"];
 
     const options: https.RequestOptions = {
-      hostname: TARGET_HOST,
+      hostname: provider.host,
       port: 443,
-      path: `${TARGET_PATH}${req.url}`,
+      path: `${provider.basePath}${req.url}`,
       method: req.method,
       headers,
     };
@@ -214,7 +312,6 @@ const server = http.createServer((req, res) => {
         proxyRes.pipe(res);
       }
 
-      // Handle upstream error after headers are already sent
       proxyRes.on("error", (err) => {
         log("error", `Upstream response error: ${err.message}`);
         if (!res.destroyed && !res.writableEnded) {
@@ -223,7 +320,7 @@ const server = http.createServer((req, res) => {
       });
     });
 
-    proxyReq.setTimeout(300_000); // 5 min timeout for long generations
+    proxyReq.setTimeout(300_000);
 
     proxyReq.on("error", (err) => {
       log("error", `Proxy error: ${err.message}`);
@@ -244,7 +341,6 @@ const server = http.createServer((req, res) => {
     sendError(res, 400, "Bad Request");
   });
 
-  // Safety: if the request body never arrives, timeout and close
   req.setTimeout(60_000, () => {
     log("error", "Request body timeout");
     req.destroy();
@@ -252,10 +348,10 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// No global socket timeout — per-request timeouts handle all phases
 server.timeout = 0;
 server.keepAliveTimeout = 30_000;
 
 server.listen(PORT, () => {
-  log("info", `Proxy listening on http://localhost:${PORT} -> ${TARGET_URL}`);
+  log("info", `Proxy listening on http://localhost:${PORT}`);
+  log("info", `Loaded providers: ${Object.keys(config.providers).join(", ")}`);
 });
