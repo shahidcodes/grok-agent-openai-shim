@@ -64,6 +64,29 @@ bun run proxy.ts
 
 If no provider prefix is given, the `defaultProvider` is used.
 
+## Configure Grok Build Agent
+
+Add this to your Grok config (e.g., `~/.grok/config.toml`) to route the agent through your proxy:
+
+```toml
+[model.firepass]
+name = "Kimi 2.6 Turbo"
+base_url = "http://localhost:3000/v1"
+model = "accounts/fireworks/routers/kimi-k2p6-turbo"
+env_key = "FIREPASS_API_KEY"
+
+[models]
+default = "firepass"
+```
+
+Then launch the agent with a specific model:
+
+```bash
+grok --model firepass
+```
+
+The `env_key` is an arbitrary name for the key Grok will read from your environment (e.g., `FIREPASS_API_KEY`). The proxy will replace it with the actual provider key configured in `config.json`, so the client never needs to know the real API key.
+
 ## Configuration
 
 | Variable | Default | Description |
