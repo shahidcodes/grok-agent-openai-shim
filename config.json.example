@@ -1,0 +1,22 @@
+{
+  "providers": {
+    "fireworks": {
+      "url": "https://api.fireworks.ai/inference/v1/chat/completions",
+      "apiKey": "YOUR_FIREWORKS_KEY",
+      "models": {
+        "kimi-k2p6-turbo": "accounts/fireworks/routers/kimi-k2p6-turbo",
+        "llama3-8b": "accounts/fireworks/models/llama-v3p1-8b-instruct",
+        "llama3-70b": "accounts/fireworks/models/llama-v3p1-70b-instruct"
+      }
+    },
+    "openrouter": {
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "apiKey": "YOUR_OPENROUTER_KEY",
+      "models": {
+        "claude-sonnet": "anthropic/claude-3.5-sonnet",
+        "gpt-4o": "openai/gpt-4o"
+      }
+    }
+  },
+  "defaultProvider": "fireworks"
+}

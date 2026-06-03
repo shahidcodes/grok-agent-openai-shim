@@ -21,33 +21,10 @@ A lightweight OpenAI-compatible proxy designed specifically for the **Grok Build
 
 ## Quick Start
 
-1. Copy `config.json` and fill in your API keys:
-
-```json
-{
-  "providers": {
-    "fireworks": {
-      "host": "api.fireworks.ai",
-      "basePath": "/v1",
-      "apiKey": "YOUR_FIREWORKS_KEY",
-      "models": {
-        "llama3-8b": "accounts/fireworks/models/llama-v3p1-8b-instruct",
-        "llama3-70b": "accounts/fireworks/models/llama-v3p1-70b-instruct"
-      }
-    },
-    "openrouter": {
-      "host": "openrouter.ai",
-      "basePath": "/api/v1",
-      "apiKey": "YOUR_OPENROUTER_KEY",
-      "models": {
-        "claude-sonnet": "anthropic/claude-3.5-sonnet",
-        "gpt-4o": "openai/gpt-4o"
-      }
-    }
-  },
-  "defaultProvider": "fireworks"
-}
-```
+1. Copy the example and fill in your real API keys:
+   ```bash
+   cp config.json.example config.json
+   ```
 
 2. Run the proxy:
 
@@ -55,7 +32,7 @@ A lightweight OpenAI-compatible proxy designed specifically for the **Grok Build
 bun run proxy.ts
 ```
 
-3. Point your client at `http://localhost:3000` and use model names like:
+3. Point your client at the proxy root `http://localhost:3000` (with or without `/v1`) and use model names like:
 
 ```json
 {
@@ -73,8 +50,8 @@ Add this to your Grok config (`~/.grok/config.toml`) to connect the agent to you
 ```toml
 [model.firepass]
 name = "Kimi 2.6 Turbo"
-base_url = "http://localhost:3000/v1"
-model = "accounts/fireworks/routers/kimi-k2p6-turbo"
+base_url = "http://localhost:3000"
+model = "fireworks/kimi-k2p6-turbo"
 env_key = "FIREPASS_API_KEY"
 
 [models]
@@ -86,6 +63,8 @@ Then launch the agent with a specific model:
 ```bash
 grok --model firepass
 ```
+
+Point clients at the proxy **root** (`http://localhost:3000`). The proxy accepts requests whether the client uses `/chat/completions`, `/v1/chat/completions`, etc. — the incoming path is not used to build the upstream call. The exact target is taken verbatim from the `url` you put in `config.json` for that provider.
 
 The `env_key` is an arbitrary name for the key Grok will read from your environment (e.g., `FIREPASS_API_KEY`). The proxy will replace it with the actual provider key configured in `config.json`, so the client never needs to know the real API key.
 

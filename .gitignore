@@ -1,0 +1,16 @@
+# User config with real keys - never commit
+config.json
+
+# Logs (may contain prompts / sensitive data)
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~

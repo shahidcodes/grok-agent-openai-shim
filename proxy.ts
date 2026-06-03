@@ -6,8 +6,12 @@ import { resolve } from "node:path";
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 interface ProviderConfig {
-  host: string;
-  basePath: string;
+  // Full target URL to forward requests to for this provider.
+  // Must be the complete URL including path, e.g. "https://api.fireworks.ai/inference/v1/chat/completions"
+  // The proxy will always hit exactly this URL (no basePath appending, no client path used).
+  // Any client can point base_url at the proxy root (http://localhost:3000 or http://localhost:3000/v1).
+  // The incoming req.url is only used for logging; upstream path comes 100% from this configured url.
+  url: string;
   apiKey: string;
   models: Record<string, string>;
 }
@@ -21,7 +25,19 @@ const CONFIG_PATH = process.env.CONFIG_PATH || resolve("config.json");
 
 function loadConfig(): Config {
   const raw = readFileSync(CONFIG_PATH, "utf-8");
-  return JSON.parse(raw) as Config;
+  const parsed = JSON.parse(raw) as any;
+
+  // Backward compat: if old config uses host + basePath, synthesize the full url.
+  // We default to https + /chat/completions so "just the full url" is what we actually call.
+  for (const [name, prov] of Object.entries(parsed.providers || {})) {
+    const p = prov as any;
+    if (!p.url && p.host) {
+      const bp = String(p.basePath || "").replace(/\/+$/, "");
+      p.url = `https://${p.host}${bp}/chat/completions`;
+    }
+  }
+
+  return parsed as Config;
 }
 
 let config = loadConfig();
@@ -126,6 +142,22 @@ function resolveProvider(modelName: string): ResolveResult | null {
   return { provider, providerName, modelAlias, resolvedModel };
 }
 
+/**
+ * Parse the provider's full `url` (e.g. "https://api.fireworks.ai/inference/v1/chat/completions")
+ * into the pieces needed for the https/http request.
+ * We use the path from this URL exactly — no modification based on client req.url.
+ */
+function parseTarget(targetUrl: string) {
+  const u = new URL(targetUrl);
+  const isHttps = u.protocol === "https:";
+  return {
+    isHttps,
+    hostname: u.hostname,
+    port: u.port ? Number(u.port) : (isHttps ? 443 : 80),
+    path: u.pathname + (u.search || "") + (u.hash || ""),
+  };
+}
+
 // ─── HTTP helpers ────────────────────────────────────────────────────────────
 
 function setCorsHeaders(res: http.ServerResponse) {
@@ -184,7 +216,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  let proxyReq: https.ClientRequest | null = null;
+  let proxyReq: http.ClientRequest | null = null;
 
   res.on("close", () => {
     proxyReq?.destroy();
@@ -224,7 +256,8 @@ const server = http.createServer((req, res) => {
     const providerName = resolved?.providerName || config.defaultProvider || "unknown";
     const provider = resolved?.provider;
 
-    log("info", `\n--- Request ${req.method} ${req.url} [${providerName}] ---`);
+    const targetForLog = provider ? provider.url : "(no provider)";
+    log("info", `\n--- Request ${req.method} ${req.url} [${providerName}] -> ${targetForLog} ---`);
     if (LOG_BODIES && originalBody) log("debug", `Original body: ${originalBody}`);
     if (LOG_BODIES && transformedBody) log("debug", `Transformed body: ${transformedBody}`);
 
@@ -233,13 +266,17 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    // Parse the provider's configured full target URL. This is the *only* source of truth for where we send the request.
+    // We do not use or inspect req.url for the upstream path at all (no stripping, no conventions).
+    const target = parseTarget(provider.url);
+
     // Build outgoing headers
     const headers: http.OutgoingHttpHeaders = {};
     for (const [key, val] of Object.entries(req.headers)) {
       if (val !== undefined) headers[key] = val;
     }
 
-    headers["host"] = provider.host;
+    headers["host"] = target.hostname;
     headers["content-length"] = body.length;
 
     // Use provider API key if configured, else fall back to client auth
@@ -256,15 +293,16 @@ const server = http.createServer((req, res) => {
     delete headers["te"];
     delete headers["trailers"];
 
-    const options: https.RequestOptions = {
-      hostname: provider.host,
-      port: 443,
-      path: `${provider.basePath}${req.url}`,
+    const options: http.RequestOptions = {
+      hostname: target.hostname,
+      port: target.port,
+      path: target.path,
       method: req.method,
       headers,
     };
 
-    proxyReq = https.request(options, (proxyRes) => {
+    const httpModule = target.isHttps ? https : http;
+    proxyReq = httpModule.request(options, (proxyRes) => {
       setCorsHeaders(res);
 
       const connectionTokens = parseConnectionTokens(
@@ -353,5 +391,8 @@ server.keepAliveTimeout = 30_000;
 
 server.listen(PORT, () => {
   log("info", `Proxy listening on http://localhost:${PORT}`);
-  log("info", `Loaded providers: ${Object.keys(config.providers).join(", ")}`);
+  log("info", "Clients can point base_url at the root (http://localhost:3000) or with /v1 — incoming path is ignored for upstream.");
+  for (const [name, p] of Object.entries(config.providers)) {
+    log("info", `  ${name}: ${p.url}`);
+  }
 });
