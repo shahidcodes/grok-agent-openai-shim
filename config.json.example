@@ -1,6 +1,6 @@
 {
   "providers": {
-    "fireworks": {
+    "firepass": {
       "url": "https://api.fireworks.ai/inference/v1/chat/completions",
       "apiKey": "YOUR_FIREWORKS_KEY",
       "models": {
@@ -17,6 +17,5 @@
         "gpt-4o": "openai/gpt-4o"
       }
     }
-  },
-  "defaultProvider": "fireworks"
+  }
 }

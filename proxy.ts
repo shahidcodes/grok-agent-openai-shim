@@ -18,7 +18,8 @@ interface ProviderConfig {
 
 interface Config {
   providers: Record<string, ProviderConfig>;
-  defaultProvider?: string;
+  // defaultProvider removed - model resolution is now strictly <providerName>/<model_key>
+  // with no fallbacks. Client must always provide a valid prefix that matches a key in providers.
 }
 
 const CONFIG_PATH = process.env.CONFIG_PATH || resolve("config.json");
@@ -36,6 +37,9 @@ function loadConfig(): Config {
       p.url = `https://${p.host}${bp}/chat/completions`;
     }
   }
+
+  // Remove defaultProvider entirely (resolution is now strictly prefix-based)
+  delete parsed.defaultProvider;
 
   return parsed as Config;
 }
@@ -57,6 +61,7 @@ watch(CONFIG_PATH, (event) => {
 // ─── Logging ──────────────────────────────────────────────────────────────────
 
 const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || "127.0.0.1";  // bind localhost by default (personal use). Use HOST=0.0.0.0 for Docker/remote if needed.
 const LOG_DIR = process.env.LOG_DIR || "logs";
 const LOG_FILE = `${LOG_DIR}/proxy.log`;
 const LOG_LEVEL = process.env.LOG_LEVEL || "info"; // silent | error | info | debug
@@ -116,21 +121,20 @@ interface ResolveResult {
 }
 
 /**
- * Resolve a model name like "fireworks/llama3-8b" to a provider + full model ID.
- * If no provider prefix is given, falls back to the default provider.
+ * Resolve a model name in the strict form "<providerName>/<model_key>".
+ * - providerName must exactly match a key under "providers" in config.json
+ * - model_key must exactly match a key in that provider's "models" object
+ * - No defaultProvider fallback. Deterministic only. Errors on mismatch.
  */
 function resolveProvider(modelName: string): ResolveResult | null {
   const slashIdx = modelName.indexOf("/");
-  let providerName: string;
-  let modelAlias: string;
-
   if (slashIdx === -1) {
-    providerName = config.defaultProvider || "";
-    modelAlias = modelName;
-  } else {
-    providerName = modelName.slice(0, slashIdx);
-    modelAlias = modelName.slice(slashIdx + 1);
+    log("error", `Invalid model format (must be <provider>/<model_key>): ${modelName}`);
+    return null;
   }
+
+  const providerName = modelName.slice(0, slashIdx);
+  const modelKey = modelName.slice(slashIdx + 1);
 
   const provider = config.providers[providerName];
   if (!provider) {
@@ -138,8 +142,13 @@ function resolveProvider(modelName: string): ResolveResult | null {
     return null;
   }
 
-  const resolvedModel = provider.models[modelAlias] || modelAlias;
-  return { provider, providerName, modelAlias, resolvedModel };
+  const resolvedModel = provider.models[modelKey];
+  if (!resolvedModel) {
+    log("error", `Unknown model key '${modelKey}' for provider '${providerName}'`);
+    return null;
+  }
+
+  return { provider, providerName, modelAlias: modelKey, resolvedModel };
 }
 
 /**
@@ -242,7 +251,13 @@ const server = http.createServer((req, res) => {
           resolved = resolveProvider(modelName);
           if (resolved) {
             json.model = resolved.resolvedModel;
+          } else {
+            sendError(res, 400, "Invalid model format or unknown provider/key (details in proxy logs)");
+            return;
           }
+        } else {
+          sendError(res, 400, "Request must include a model field in the form <provider>/<model_key>");
+          return;
         }
 
         const cleaned = cleanPayload(json);
@@ -253,18 +268,13 @@ const server = http.createServer((req, res) => {
       }
     }
 
-    const providerName = resolved?.providerName || config.defaultProvider || "unknown";
-    const provider = resolved?.provider;
+    const providerName = resolved!.providerName;
+    const provider = resolved!.provider;
 
-    const targetForLog = provider ? provider.url : "(no provider)";
+    const targetForLog = provider.url;
     log("info", `\n--- Request ${req.method} ${req.url} [${providerName}] -> ${targetForLog} ---`);
     if (LOG_BODIES && originalBody) log("debug", `Original body: ${originalBody}`);
     if (LOG_BODIES && transformedBody) log("debug", `Transformed body: ${transformedBody}`);
-
-    if (!provider) {
-      sendError(res, 400, "Unknown provider or missing model");
-      return;
-    }
 
     // Parse the provider's configured full target URL. This is the *only* source of truth for where we send the request.
     // We do not use or inspect req.url for the upstream path at all (no stripping, no conventions).
@@ -389,8 +399,9 @@ const server = http.createServer((req, res) => {
 server.timeout = 0;
 server.keepAliveTimeout = 30_000;
 
-server.listen(PORT, () => {
-  log("info", `Proxy listening on http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  const displayHost = HOST === "0.0.0.0" ? "0.0.0.0 (all interfaces)" : HOST;
+  log("info", `Proxy listening on http://${displayHost}:${PORT}`);
   log("info", "Clients can point base_url at the root (http://localhost:3000) or with /v1 — incoming path is ignored for upstream.");
   for (const [name, p] of Object.entries(config.providers)) {
     log("info", `  ${name}: ${p.url}`);
