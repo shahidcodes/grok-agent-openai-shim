@@ -1,6 +1,8 @@
 # grok-agent-openai-shim
 
-Multi-provider OpenAI-compatible proxy for personal use. Route requests to different LLM providers (Fireworks, OpenRouter, OpenAI, etc.) by prefixing the model name with the provider key.
+A lightweight OpenAI-compatible proxy designed specifically for the **Grok Build** agent. Route your Grok agent's LLM requests to multiple providers (Fireworks, OpenRouter, OpenAI, etc.) through a single local endpoint, with provider/model routing and automatic API key injection.
+
+**Built for:** Grok Build agent ([xAI](https://x.ai))
 
 ## Features
 
@@ -64,9 +66,9 @@ bun run proxy.ts
 
 If no provider prefix is given, the `defaultProvider` is used.
 
-## Configure Grok Build Agent
+## Grok Build Agent Setup
 
-Add this to your Grok config (e.g., `~/.grok/config.toml`) to route the agent through your proxy:
+Add this to your Grok config (`~/.grok/config.toml`) to connect the agent to your proxy:
 
 ```toml
 [model.firepass]
